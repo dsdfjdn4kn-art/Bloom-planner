@@ -12,6 +12,7 @@ header{position:sticky;top:0;z-index:10;background:rgba(246,241,230,.9);backdrop
 .btn{border:1px solid var(--line);background:var(--card);border-radius:12px;padding:10px 12px;font-weight:650;cursor:pointer}
 .btn.primary{background:linear-gradient(180deg,#91B59A,#7A9B83);border-color:#70937A}
 .btn.gold{background:linear-gradient(180deg,#D7BF85,#C7A463);border-color:#B6934F}
+.btn.small{padding:7px 10px;border-radius:10px;font-size:12px}
 .btn:active{transform:translateY(1px)}
 .pill{display:inline-flex;gap:8px;align-items:center;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:var(--card);font-size:12px;color:var(--muted)}
 .pill b{color:var(--ink)}
@@ -36,6 +37,7 @@ select,input,textarea{width:100%;border:1px solid var(--line);background:#FFFEFB
 .bloom{width:52px;height:52px;border-radius:16px;background:radial-gradient(circle at 30% 30%,#BFE0C9,#7A9B83);border:1px solid #6E9276;position:relative;box-shadow:0 10px 20px rgba(0,0,0,.08)}
 .bloom:before,.bloom:after{content:"";position:absolute;top:18px;width:8px;height:8px;border-radius:50%;background:#0E1711;opacity:.9}
 .bloom:before{left:14px}.bloom:after{right:14px}.mouth{position:absolute;left:50%;top:34px;transform:translateX(-50%);width:18px;height:8px;border-bottom:2px solid #0E1711;border-radius:0 0 18px 18px;opacity:.8}
+.zitem{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--line);border-radius:14px;background:#FFFEFB}
 </style></head><body>
 <header><div class="wrap mini" style="justify-content:space-between">
 <div><h1>Bloom Planner</h1><div class="sub" id="dateLine"></div></div>
@@ -79,8 +81,13 @@ select,input,textarea{width:100%;border:1px solid var(--line);background:#FFFEFB
     </div>
 
     <div class="card col">
-      <h2>FlyLady (Zones + Weekly Blessing)</h2>
+      <h2>FlyLady</h2>
       <div class="notice" id="flyPanel">Loading…</div>
+
+      <div class="hr"></div>
+      <h2>Zone tasks (choose for today)</h2>
+      <div class="sub" id="zoneHint"></div>
+      <div class="grid" id="zonePicker"></div>
 
       <div class="hr"></div>
       <h2>Rewards</h2>
@@ -112,9 +119,9 @@ const $=id=>document.getElementById(id), todayKey=()=>new Date().toISOString().s
 const clamp=(n,min,max)=>Math.max(min,Math.min(max,n));
 function startOfWeekISO(d=new Date()){const x=new Date(d),day=(x.getDay()+6)%7;x.setHours(0,0,0,0);x.setDate(x.getDate()-day);return x.toISOString().slice(0,10);}
 const RULES={xp:{easy:10,med:25,hard:60},coins:{easy:1,med:3,hard:7},minutes:{easy:5,med:15,hard:40},levelEveryXP:250,clothes:{coinsGoal:60,dollarsMax:15}};
-const STORE="bloomPlanner.v3";
+const STORE="bloomPlanner.v4";
 
-// FlyLady zones (your home)
+// Zones (your home)
 const ZONES=[
  {n:1,rooms:"Entryway, living room, short hallways, 2 closets"},
  {n:2,rooms:"Kitchen, dining"},
@@ -129,7 +136,6 @@ const ZONE_TASKS={
   4:["Bedroom surfaces dust","Master bath quick clean","Shower quick wipe","Linen refresh (if needed)"],
   5:["Office: clear desk surface (10 min)","Paper sweep (10 items)","Wipe Pilates machine","Put away equipment reset","Closet: declutter 10 items"],
 };
-// WHBH split Mon–Fri (1 item/day)
 const WHBH_BY_DOW={
   1:{id:"whbh_dust",name:"WHBH: Dust a main area (quick)",diff:"easy"},
   2:{id:"whbh_floors",name:"WHBH: Vacuum/sweep main floors",diff:"med"},
@@ -141,22 +147,22 @@ const WHBH_BY_DOW={
 function weekOfMonth(date=new Date()){
   const d=new Date(date); d.setHours(0,0,0,0);
   const first=new Date(d.getFullYear(),d.getMonth(),1);
-  const offset=(first.getDay()+6)%7; // Mon=0
-  return Math.ceil((d.getDate()+offset)/7); // 1..5
+  const offset=(first.getDay()+6)%7;
+  return Math.ceil((d.getDate()+offset)/7);
 }
 function currentZoneNumber(date=new Date()){
   const wom=weekOfMonth(date); return wom>=5?5:wom;
 }
-function load(){
-  const raw=localStorage.getItem(STORE);
-  if(raw){try{return JSON.parse(raw)}catch(e){}}
-  return {createdAt:new Date().toISOString(),tasks:baseTasks(),days:{},xpTotal:0,streak:0,lastDoneDay:null,feedback:[],tuning:{capEasy:6,capMed:3,capHard:1}};
+function whbhForToday(){
+  const d=new Date();
+  const dow=((d.getDay()+6)%7)+1;
+  if(dow<1||dow>5) return null;
+  const item=WHBH_BY_DOW[dow]; if(!item) return null;
+  return {id:item.id,name:item.name,area:"WHBH",diff:item.diff,freq:"weekly",weight:5,virtual:true};
 }
-function save(){localStorage.setItem(STORE,JSON.stringify(state))}
 
 function baseTasks(){
   return [
-    // Daily pinned non-negotiables
     {id:"morning",name:"Morning routine",area:"Daily",diff:"easy",freq:"daily",weight:6,pinned:true},
     {id:"evening",name:"Evening routine",area:"Daily",diff:"easy",freq:"daily",weight:6,pinned:true},
     {id:"workemail",name:"Work email",area:"Daily",diff:"med",freq:"daily",weight:6,pinned:true},
@@ -164,7 +170,6 @@ function baseTasks(){
     {id:"dishes",name:"Dishes (reset kitchen)",area:"Daily",diff:"med",freq:"daily",weight:6,pinned:true},
     {id:"litter",name:"Cat litter",area:"Daily",diff:"easy",freq:"daily",weight:6,pinned:true},
 
-    // Other tasks (not all daily)
     {id:"project",name:"Project work",area:"Work",diff:"hard",freq:"daily",weight:4},
     {id:"expense",name:"Expense report",area:"Work",diff:"med",freq:"weekly",weight:2},
 
@@ -179,6 +184,12 @@ function baseTasks(){
   ];
 }
 
+function load(){
+  const raw=localStorage.getItem(STORE);
+  if(raw){try{return JSON.parse(raw)}catch(e){}}
+  return {createdAt:new Date().toISOString(),tasks:baseTasks(),days:{},xpTotal:0,streak:0,lastDoneDay:null,feedback:[],tuning:{capEasy:6,capMed:3,capHard:1}};
+}
+function save(){localStorage.setItem(STORE,JSON.stringify(state))}
 let state=load();
 
 function getDoneDates(taskId){
@@ -202,12 +213,11 @@ function isDue(task,date=new Date()){
 }
 function capsFor(cap){
   const t=state.tuning;
-  if(cap==="overwhelmed") return {easy:6,med:0,hard:0}; // pinned only, plus maybe 1 tiny win
+  if(cap==="overwhelmed") return {easy:6,med:0,hard:0};
   if(cap==="low") return {easy:Math.max(3,t.capEasy-2),med:Math.max(1,t.capMed-1),hard:0};
   if(cap==="high") return {easy:t.capEasy+2,med:t.capMed+1,hard:t.capHard};
   return {easy:t.capEasy,med:t.capMed,hard:t.capHard};
 }
-
 function calcDayTotals(k){
   const day=state.days[k]; if(!day||!day.plan) return {xp:0,coins:0,done:0,total:0};
   let xp=0,coins=0,done=0,total=day.plan.length;
@@ -220,8 +230,7 @@ function calcDayTotals(k){
 }
 function calcWeekCoins(now=new Date()){
   const wk=startOfWeekISO(now);
-  let sum=0;
-  for(const k of Object.keys(state.days)){ if(k<wk) continue; sum+=calcDayTotals(k).coins; }
+  let sum=0; for(const k of Object.keys(state.days)){ if(k<wk) continue; sum+=calcDayTotals(k).coins; }
   return sum;
 }
 function applyCompletionEffects(){
@@ -240,28 +249,12 @@ function applyCompletionEffects(){
   save();
 }
 
+function ensureVirtualTask(t){
+  if(!state.tasks.some(x=>x.id===t.id)) state.tasks.push(t);
+}
 function addUnique(plan, id){
   if(plan.some(p=>p.taskId===id)) return;
   plan.push({taskId:id,done:false});
-}
-
-function whbhForToday(){
-  const d=new Date();
-  const dow=((d.getDay()+6)%7)+1; // Mon=1..Sun=7
-  if(dow<1||dow>5) return null;
-  const item=WHBH_BY_DOW[dow]; if(!item) return null;
-  return {id:item.id,name:item.name,area:"WHBH",diff:item.diff,freq:"weekly",weight:5,virtual:true};
-}
-function buildZoneTask(){
-  const zn=currentZoneNumber(new Date());
-  const pool=ZONE_TASKS[zn]||[];
-  const pick=pool[Math.floor(Math.random()*pool.length)]||"Zone tidy";
-  const id="zone_"+zn+"_"+pick.toLowerCase().replace(/[^a-z0-9]+/g,"_").slice(0,40);
-  return {id,name:"Zone "+zn+": "+pick,area:"Zone "+zn,diff:"easy",freq:"daily",weight:4,virtual:true};
-}
-
-function ensureVirtualTask(t){
-  if(!state.tasks.some(x=>x.id===t.id)) state.tasks.push(t);
 }
 
 function generatePlan(dateKey, cap, budget){
@@ -269,7 +262,7 @@ function generatePlan(dateKey, cap, budget){
   const caps=capsFor(cap);
   let plan=[], counts={easy:0,med:0,hard:0}, mins=0;
 
-  // Pin all pinned tasks first (always)
+  // Pinned
   const pinned=state.tasks.filter(t=>t.pinned);
   for(const t of pinned){
     addUnique(plan,t.id);
@@ -277,7 +270,7 @@ function generatePlan(dateKey, cap, budget){
     counts[t.diff]=(counts[t.diff]||0)+1;
   }
 
-  // Overwhelmed: pinned + (optional) 1 tiny win if time remains
+  // Overwhelmed: pinned + optional tiny win
   if(cap==="overwhelmed"){
     const tiny=["plants","declutter"].filter(id=>state.tasks.some(t=>t.id===id));
     for(const id of tiny){
@@ -289,22 +282,17 @@ function generatePlan(dateKey, cap, budget){
     save(); return;
   }
 
-  // Add WHBH for today if it fits
+  // WHBH
   const wh=whbhForToday();
   if(wh){
     const m=RULES.minutes[wh.diff]||10;
-    if(mins+m<=budget){ ensureVirtualTask(wh); addUnique(plan,wh.id); mins+=m; counts[wh.diff]=(counts[wh.diff]||0)+1; }
+    if(mins+m<=budget){
+      ensureVirtualTask(wh); addUnique(plan,wh.id);
+      mins+=m; counts[wh.diff]=(counts[wh.diff]||0)+1;
+    }
   }
 
-  // Add zone tasks: 1 (normal/low), 2 (high)
-  const zoneN=(cap==="high")?2:1;
-  for(let i=0;i<zoneN;i++){
-    const zt=buildZoneTask(), m=RULES.minutes[zt.diff]||10;
-    if(mins+m>budget) break;
-    ensureVirtualTask(zt); addUnique(plan,zt.id); mins+=m; counts[zt.diff]=(counts[zt.diff]||0)+1;
-  }
-
-  // Fill with due tasks, respecting caps/budget
+  // Fill with due tasks (no automatic zone tasks)
   const due=state.tasks.filter(t=>!t.pinned && !t.virtual && isDue(t,date));
   const scored=due.map(t=>{
     const done=getDoneDates(t.id);
@@ -332,13 +320,43 @@ function generatePlan(dateKey, cap, budget){
   save();
 }
 
+function addZoneTaskToToday(taskName){
+  const k=todayKey();
+  if(!state.days[k]) generatePlan(k,$("capacity").value,clamp(parseInt($("timeBudget").value||"90",10),10,360));
+  const day=state.days[k];
+
+  const zn=currentZoneNumber(new Date());
+  const id="zone_"+zn+"_"+taskName.toLowerCase().replace(/[^a-z0-9]+/g,"_").slice(0,40);
+  const t={id,name:"Zone "+zn+": "+taskName,area:"Zone "+zn,diff:"easy",freq:"daily",weight:4,virtual:true};
+  ensureVirtualTask(t);
+  addUnique(day.plan, id);
+  save(); render();
+}
+
 function levelFromXP(xp){return Math.max(1,Math.floor((xp||0)/RULES.levelEveryXP)+1);}
 function bloomMessage(){
   const k=todayKey(), totals=calcDayTotals(k), pct=totals.total?Math.round((totals.done/totals.total)*100):0;
-  if(totals.total===0) return "Generate Today. Your non‑negotiables will always be included.";
+  if(totals.total===0) return "Generate Today. Then pick 1 zone task (2 if High capacity).";
   if(pct>=100) return "Completed. Stop on purpose.";
   if(pct>0) return "Nice start. Choose the easiest next step.";
   return "Start tiny. Momentum first.";
+}
+
+function renderZonePicker(){
+  const zn=currentZoneNumber(new Date());
+  const pool=ZONE_TASKS[zn]||[];
+  const cap=$("capacity").value;
+  const recommended = (cap==="high") ? 2 : 1;
+  $("zoneHint").textContent = "Current Zone "+zn+". Choose "+recommended+" task"+(recommended>1?"s":"")+" for today (optional, but recommended).";
+
+  const host=$("zonePicker"); host.innerHTML="";
+  for(const name of pool){
+    const row=document.createElement("div");
+    row.className="zitem";
+    row.innerHTML="<div><b>Zone "+zn+"</b> — "+name+"</div><button class='btn small'>Add</button>";
+    row.querySelector("button").addEventListener("click",()=>addZoneTaskToToday(name));
+    host.appendChild(row);
+  }
 }
 
 function render(){
@@ -347,7 +365,6 @@ function render(){
   if(day){$("capacity").value=day.capacity||"normal";$("timeBudget").value=day.timeBudget||90;}
   $("bloomSays").textContent=bloomMessage();
 
-  // Fly panel
   const zn=currentZoneNumber(new Date());
   const rooms=ZONES.find(z=>z.n===zn)?.rooms||"";
   const dow=((new Date().getDay()+6)%7)+1;
@@ -357,7 +374,8 @@ function render(){
     "<b>Today’s WHBH:</b> "+(wh?wh.name.replace("WHBH: ",""):"(none — weekend)")+
     "<div class='sub'>WHBH is split Mon–Fri (1 item/day).</div>";
 
-  // tasks
+  renderZonePicker();
+
   const list=$("taskList"); list.innerHTML="";
   const plan=day?.plan||[];
   for(const p of plan){
