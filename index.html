@@ -367,4 +367,405 @@ const DEFAULT_TASKS = [
   { id:"vacuum", name:"Vacuum / sweeping", area:"Home – Floors", diff:"med", freq:"weekly", weight:3 },
   { id:"mop", name:"Run mop", area:"Home – Floors", diff:"med", freq:"weekly", weight:2 },
 
-  { id:"pilateswipe", name:"Wipe down Pilates machine", area
+  { id:"pilateswipe", name:"Wipe down Pilates machine", area:"Home – Wipe/Reset", diff:"easy", freq:"weekly", weight:3 },
+  { id:"baseboards", name:"Wipe baseboards (one zone)", area:"Home – Wipe/Reset", diff:"med", freq:"monthly", weight:1 },
+  { id:"dust", name:"Dust (choose 1 room)", area:"Home – Wipe/Reset", diff:"easy", freq:"weekly", weight:3 },
+
+  { id:"laundry", name:"Laundry", area:"Laundry", diff:"med", freq:"weekly", weight:3 },
+  { id:"declutter", name:"Declutter one box/drawer", area:"Declutter", diff:"med", freq:"weekly", weight:2 },
+  { id:"plants", name:"Water plants", area:"Plants", diff:"easy", freq:"weekly", weight:2 },
+
+  { id:"bathdeep", name:"Clean (deep) a bathroom", area:"Deep Clean", diff:"hard", freq:"monthly", weight:1 },
+
+  { id:"workout", name:"Work out", area:"Health", diff:"hard", freq:"weekly", weight:2 },
+];
+
+const STORE_KEY = "bloomPlanner.v1";
+
+function loadState(){
+  const raw = localStorage.getItem(STORE_KEY);
+  if(raw){
+    try { return JSON.parse(raw); } catch(e){}
+  }
+  return {
+    createdAt: new Date().toISOString(),
+    tasks: DEFAULT_TASKS,
+    days: {},
+    xpTotal: 0,
+    streak: 0,
+    lastDoneDay: null,
+    feedback: [],
+    tuning: { capEasy: 6, capMed: 3, capHard: 1 }
+  };
+}
+let state = loadState();
+function saveState(){ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+
+function getDoneDatesForTask(taskId){
+  const keys = Object.keys(state.days).sort();
+  const done = [];
+  for(const k of keys){
+    const day = state.days[k];
+    if(!day || !day.plan) continue;
+    const entry = day.plan.find(x=>x.taskId===taskId);
+    if(entry && entry.done) done.push(k);
+  }
+  return done;
+}
+
+function isDue(task, date=new Date()){
+  const doneDates = getDoneDatesForTask(task.id);
+  const last = doneDates.length ? new Date(doneDates[doneDates.length-1]) : null;
+  if(task.freq === "daily") return true;
+  if(!last) return true;
+  const diffDays = Math.floor((date - last)/(1000*60*60*24));
+  if(task.freq === "weekly") return diffDays >= 6;
+  if(task.freq === "monthly") return diffDays >= 25;
+  return true;
+}
+
+function capsFor(capacity){
+  const t = state.tuning;
+  if(capacity==="overwhelmed") return { easy: 4, med: 0, hard: 0 };
+  if(capacity==="low") return { easy: Math.max(2, t.capEasy-3), med: Math.max(1, t.capMed-2), hard: 0 };
+  if(capacity==="high") return { easy: t.capEasy+2, med: t.capMed+1, hard: t.capHard };
+  return { easy: t.capEasy, med: t.capMed, hard: t.capHard };
+}
+
+function generatePlan(dateKey, capacity, timeBudget){
+  const date = new Date(dateKey+"T12:00:00");
+
+  // Overwhelmed mode: essentials + 1 tiny win
+  if(capacity === "overwhelmed"){
+    const essentials = ["morning","evening","workemail"];
+    const plan = [];
+    for(const id of essentials){
+      if(state.tasks.some(t=>t.id===id)) plan.push({taskId:id, done:false});
+    }
+    const tinyCandidates = ["personalemail","plants","dust","pilateswipe"];
+    for(const id of tinyCandidates){
+      if(plan.length >= 4) break;
+      if(!state.tasks.some(t=>t.id===id)) continue;
+      const task = state.tasks.find(t=>t.id===id);
+      const m = RULES.minutes[task.diff] || 10;
+      const currentMins = plan.reduce((acc,p)=>{
+        const tt = state.tasks.find(x=>x.id===p.taskId);
+        return acc + (RULES.minutes[tt.diff] || 10);
+      },0);
+      if(currentMins + m <= timeBudget) plan.push({taskId:id, done:false});
+    }
+    state.days[dateKey] = { plan, capacity, timeBudget, createdAt:new Date().toISOString() };
+    saveState();
+    return;
+  }
+
+  const caps = capsFor(capacity);
+  const due = state.tasks.filter(t=>isDue(t,date));
+  const scored = due.map(t=>{
+    const doneDates = getDoneDatesForTask(t.id);
+    const last = doneDates.length? new Date(doneDates[doneDates.length-1]) : null;
+    const daysSince = last ? Math.floor((date-last)/(1000*60*60*24)) : 999;
+    const urgency = clamp(daysSince/7, 0, 4);
+    const score = (t.weight||1) + urgency + (t.freq==="daily"?2:0);
+    return {t, score};
+  }).sort((a,b)=>b.score-a.score);
+
+  let pick = [];
+  let counts = {easy:0, med:0, hard:0};
+  let minutes = 0;
+
+  function canAdd(diff){
+    if(diff==="easy") return counts.easy < caps.easy;
+    if(diff==="med") return counts.med < caps.med;
+    if(diff==="hard") return counts.hard < caps.hard;
+    return true;
+  }
+
+  for(const {t} of scored){
+    if(!canAdd(t.diff)) continue;
+    const m = RULES.minutes[t.diff] || 15;
+    if(minutes + m > timeBudget) continue;
+    pick.push({taskId:t.id, done:false});
+    counts[t.diff]++; minutes += m;
+  }
+
+  if(pick.length===0){
+    const essentials = ["workemail","morning","evening"].filter(id=>state.tasks.some(t=>t.id===id));
+    for(const id of essentials){
+      if(pick.length>=3) break;
+      pick.push({taskId:id, done:false});
+    }
+  }
+
+  state.days[dateKey] = { plan: pick, capacity, timeBudget, createdAt:new Date().toISOString() };
+  saveState();
+}
+
+function calcDayTotals(dayKey){
+  const day = state.days[dayKey];
+  if(!day || !day.plan) return {xp:0, coins:0, done:0, total:0};
+  let xp=0, coins=0, done=0, total=day.plan.length;
+  for(const p of day.plan){
+    if(!p.done) continue;
+    const t = state.tasks.find(x=>x.id===p.taskId);
+    if(!t) continue;
+    xp += RULES.xp[t.diff] || 0;
+    coins += RULES.coins[t.diff] || 0;
+    done++;
+  }
+  return {xp, coins, done, total};
+}
+
+function calcWeekCoins(now=new Date()){
+  const wk = startOfWeekISO(now);
+  let sum=0;
+  for(const [k] of Object.entries(state.days)){
+    if(k < wk) continue;
+    sum += calcDayTotals(k).coins;
+  }
+  return sum;
+}
+
+function applyCompletionEffects(){
+  let xp=0;
+  for(const k of Object.keys(state.days)){
+    xp += calcDayTotals(k).xp;
+  }
+  state.xpTotal = xp;
+
+  const k = todayKey();
+  const totals = calcDayTotals(k);
+  const hadDoneToday = totals.done>0;
+  if(hadDoneToday){
+    if(state.lastDoneDay){
+      const prev = new Date(state.lastDoneDay+"T12:00:00");
+      const cur = new Date(k+"T12:00:00");
+      const diffDays = Math.floor((cur-prev)/(1000*60*60*24));
+      if(diffDays===1) state.streak = (state.streak||0)+1;
+      else if(diffDays>1) state.streak = 1;
+    } else {
+      state.streak = 1;
+    }
+    state.lastDoneDay = k;
+  }
+  saveState();
+}
+
+function applyCheckin(feel, actualTime, skipped){
+  let msg = [];
+  const t = state.tuning;
+
+  const timeFactor = {
+    "lt30": -1, "30-60": 0, "60-120": 1, "gt120": 2
+  }[actualTime] ?? 1;
+
+  let feelShift = 0;
+  if(feel==="easy") feelShift = 1;
+  if(feel==="hard") feelShift = -1;
+  if(feel==="overwhelmed") feelShift = -2;
+
+  if(skipped==="deep"){
+    t.capHard = clamp(t.capHard-1, 0, 2);
+    msg.push("I’ll reduce hard-task pressure for now.");
+  }
+  if(skipped==="floors"){
+    t.capMed = clamp(t.capMed-1, 1, 6);
+    msg.push("I’ll lighten medium tasks a bit (floors).");
+  }
+  if(skipped==="work"){
+    t.capHard = clamp(t.capHard-1, 0, 2);
+    msg.push("I’ll avoid stacking heavy work tasks.");
+  }
+
+  const delta = timeFactor + feelShift;
+  if(delta >= 2){
+    t.capEasy = clamp(t.capEasy+1, 3, 10);
+    t.capMed  = clamp(t.capMed+1, 1, 6);
+    msg.push("Tomorrow can be a little fuller.");
+  } else if(delta <= -2){
+    t.capEasy = clamp(t.capEasy-1, 2, 10);
+    t.capMed  = clamp(t.capMed-1, 1, 6);
+    t.capHard = clamp(t.capHard-1, 0, 2);
+    msg.push("I’ll cap tomorrow more tightly so it feels doable.");
+  } else {
+    msg.push("No big changes—steady plan.");
+  }
+
+  saveState();
+  return msg.join(" ");
+}
+
+function fmtDateLine(){
+  const d = new Date();
+  return d.toLocaleDateString(undefined, { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+}
+function levelFromXP(xp){ return Math.max(1, Math.floor(xp / RULES.levelEveryXP) + 1); }
+
+function bloomMessage(){
+  const k = todayKey();
+  const totals = calcDayTotals(k);
+  const pct = totals.total ? Math.round((totals.done/totals.total)*100) : 0;
+  const wkCoins = calcWeekCoins(new Date());
+
+  if(totals.total===0) return "Pick capacity + time budget, then Generate. If you’re overwhelmed, choose that mode—no guilt.";
+  if(pct>=100) return "Completed. You did it. You can stop now on purpose.";
+  if(pct>=60) return "You’re past the hardest part. Choose the next easiest task.";
+  if(pct>0) return "Nice start. Small wins count—especially on hard days.";
+  if(wkCoins>=RULES.clothes.coinsGoal) return "Clothes fund fully unlocked this week. Everything now is bonus.";
+  return "Start with the smallest task. Momentum first, perfection later.";
+}
+
+function render(){
+  $("dateLine").textContent = fmtDateLine();
+
+  const k = todayKey();
+  const day = state.days[k];
+  if(day){
+    $("capacity").value = day.capacity || "normal";
+    $("timeBudget").value = day.timeBudget || 90;
+  }
+
+  const list = $("taskList");
+  list.innerHTML = "";
+  const plan = day?.plan || [];
+
+  for(const item of plan){
+    const t = state.tasks.find(x=>x.id===item.taskId);
+    if(!t) continue;
+    const xp = RULES.xp[t.diff], coins=RULES.coins[t.diff], mins=RULES.minutes[t.diff];
+
+    const el = document.createElement("div");
+    el.className = "task";
+    el.innerHTML = `
+      <div class="left">
+        <div class="check ${item.done?"on":""}" role="button" aria-label="toggle">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 16.6 4.9 12.3l1.4-1.4 2.9 2.9 8.4-8.4 1.4 1.4z"/></svg>
+        </div>
+        <div>
+          <div class="name">${t.name}</div>
+          <div class="meta">
+            <span class="tag sage">${t.area}</span>
+            <span class="tag">${t.diff.toUpperCase()}</span>
+            <span class="tag mono">~${mins}m</span>
+          </div>
+        </div>
+      </div>
+      <div class="right">
+        <span class="tag gold mono">+${xp} XP</span>
+        <span class="tag mono">+${coins} coin</span>
+      </div>
+    `;
+    el.querySelector(".check").addEventListener("click", ()=>{
+      item.done = !item.done;
+      applyCompletionEffects();
+      saveState();
+      render();
+    });
+    list.appendChild(el);
+  }
+
+  const totals = calcDayTotals(k);
+  const pct = totals.total ? Math.round((totals.done/totals.total)*100) : 0;
+  $("todayPct").textContent = pct + "%";
+  $("todayBar").style.width = pct + "%";
+  $("xpToday").textContent = totals.xp;
+  $("coinsToday").textContent = totals.coins;
+  $("streak").textContent = state.streak || 0;
+
+  $("xpTotal").textContent = state.xpTotal || 0;
+  $("level").textContent = levelFromXP(state.xpTotal||0);
+
+  const weekCoins = calcWeekCoins(new Date());
+  $("coinsWeek").textContent = weekCoins;
+
+  const unlock = RULES.clothes.dollarsMax * clamp(weekCoins / RULES.clothes.coinsGoal, 0, 1);
+  $("clothesUnlocked").textContent = "$" + round2(unlock).toFixed(2);
+  $("clothesBar").style.width = (clamp(weekCoins / RULES.clothes.coinsGoal, 0, 1) * 100) + "%";
+
+  $("bloomSays").textContent = bloomMessage();
+}
+
+$("btnGenerate").addEventListener("click", ()=>{
+  const cap = $("capacity").value;
+  const budget = parseInt($("timeBudget").value||"90",10);
+  generatePlan(todayKey(), cap, clamp(budget, 10, 360));
+  render();
+});
+
+$("btnRebalance").addEventListener("click", ()=>{
+  const k = todayKey();
+  const day = state.days[k];
+  if(!day?.plan) return;
+  day.plan.sort((a,b)=>{
+    const ta = state.tasks.find(x=>x.id===a.taskId);
+    const tb = state.tasks.find(x=>x.id===b.taskId);
+    const da = ta?.diff==="easy"?0:ta?.diff==="med"?1:2;
+    const db = tb?.diff==="easy"?0:tb?.diff==="med"?1:2;
+    return da-db;
+  });
+  saveState();
+  render();
+});
+
+$("btnNewDay").addEventListener("click", ()=>{
+  const k = todayKey();
+  delete state.days[k];
+  saveState();
+  render();
+});
+
+$("btnSaveFeedback").addEventListener("click", ()=>{
+  const text = ($("freeFeedback").value||"").trim();
+  if(!text) return;
+
+  state.feedback.push({ ts:new Date().toISOString(), text });
+  $("freeFeedback").value = "";
+
+  const lowered = /overwhelm|overwhelmed|too much|exhaust|exhausted|burnout|can’t|cannot|impossible|stressed|anxious/i.test(text);
+  if(lowered){
+    state.tuning.capEasy = clamp(state.tuning.capEasy-1, 2, 10);
+    state.tuning.capMed  = clamp(state.tuning.capMed-1, 1, 6);
+    state.tuning.capHard = clamp(state.tuning.capHard-1, 0, 2);
+    $("capacity").value = "overwhelmed";
+  }
+
+  const cap = $("capacity").value;
+  const budget = parseInt($("timeBudget").value||"90",10);
+  generatePlan(todayKey(), cap, clamp(budget, 10, 360));
+
+  saveState();
+  $("checkinResult").innerHTML =
+    `<div class="notice"><strong>Saved.</strong> I updated Today based on your feedback${lowered ? " (Overwhelmed mode)." : "."}</div>`;
+  render();
+});
+
+$("btnApplyCheckin").addEventListener("click", ()=>{
+  const feel = $("feel").value;
+  const actualTime = $("actualTime").value;
+  const skipped = $("skipped").value;
+  const msg = applyCheckin(feel, actualTime, skipped);
+  $("checkinResult").innerHTML = `<div class="notice"><strong>Applied.</strong> ${msg}</div>`;
+  render();
+});
+
+$("btnExport").addEventListener("click", ()=>{
+  const data = JSON.stringify(state, null, 2);
+  const w = window.open();
+  w.document.write(`<pre style="white-space:pre-wrap; font-family: ui-monospace, Menlo, monospace; padding:16px;">${data.replace(/[<]/g,"&lt;")}</pre>`);
+  w.document.title = "Bloom Planner Export";
+});
+
+$("btnReset").addEventListener("click", ()=>{
+  const ok = confirm("Reset clears all tasks, history, XP, coins, and feedback on this phone. Continue?");
+  if(!ok) return;
+  localStorage.removeItem(STORE_KEY);
+  state = loadState();
+  saveState();
+  render();
+});
+
+saveState();
+render();
+</script>
+</body>
+</html>
